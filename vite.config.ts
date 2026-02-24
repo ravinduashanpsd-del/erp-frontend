@@ -50,7 +50,6 @@ export default defineConfig({
   ],
 
   preview: {
-    // Add your Railway domain here to allow Vite preview host checks.
-    allowedHosts: ["erp-frontend-production-4f4c.up.railway.app"],
-  },
+  allowedHosts: [".up.railway.app"],
+},
 });
