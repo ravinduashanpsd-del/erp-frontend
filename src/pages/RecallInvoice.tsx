@@ -79,6 +79,21 @@ const getInvoiceItemsArray = (inv: any): any[] => {
 
 const isGenericCustomerLabel = (value?: string | null) => !!(value && /^customer\s*\d*$/i.test(String(value).trim()));
 
+const getBestCustomerNameFromEntity = (entity: any): string => {
+  if (!entity) return "";
+  const normalize = (v: any) => (typeof v === "string" ? v.trim() : "");
+  const names = [
+    entity?.name, entity?.full_name, entity?.fullName, entity?.customer_name, entity?.customerName, entity?.display_name, entity?.displayName,
+    entity?.profile?.name, entity?.profile?.full_name, entity?.profile?.fullName, entity?.user?.name, entity?.user?.full_name, entity?.user?.fullName,
+    entity?.user?.first_name && entity?.user?.last_name ? `${entity.user.first_name} ${entity.user.last_name}` : "",
+    entity?.profile?.first_name && entity?.profile?.last_name ? `${entity.profile.first_name} ${entity.profile.last_name}` : "",
+    `${entity?.first_name ?? entity?.firstName ?? ""} ${entity?.last_name ?? entity?.lastName ?? ""}`.trim(),
+  ].map(normalize).filter(Boolean);
+  const nonGeneric = names.find((n) => !isGenericCustomerLabel(n));
+  return nonGeneric || names[0] || "";
+};
+
+
 const getCustomerName = (inv: any, customersById: Record<number, any>) => {
   // 1) If invoice already contains customer name (varies by backend)
   const direct = inv?.customer;
@@ -138,6 +153,53 @@ const getInvoiceNoNumeric = (inv: any) => {
 };
 
 const ITEMS_PER_PAGE = 10;
+
+const enrichInvoicesWithCustomerNames = async (rows: any[], customersById: Record<number, any>) => {
+  const needsEnrichment = (inv: any) => {
+    const current = getCustomerName(inv, customersById);
+    const cid = getCustomerIdFromInvoice(inv);
+    return isGenericCustomerLabel(current) || (!cid && !inv?.customer);
+  };
+
+  const targets = rows.filter(needsEnrichment).slice(0, 200);
+  if (targets.length === 0) return rows;
+
+  const byId = new Map<number, any>();
+  const ids = Array.from(new Set(targets.map((i) => getInvoiceId(i)).filter((v): v is number => Number.isFinite(v as number) && Number(v) > 0)));
+  const chunkSize = 8;
+
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const results = await Promise.all(chunk.map(async (id) => {
+      try {
+        const res = await getInvoiceById(id);
+        const full: any = res.data?.data?.invoice ?? res.data?.data ?? res.data?.invoice ?? res.data ?? null;
+        return full ? { id, full } : null;
+      } catch {
+        return null;
+      }
+    }));
+
+    for (const r of results) {
+      if (!r) continue;
+      const full = r.full;
+      const cid = getCustomerIdFromInvoice(full);
+      const customer = full?.customer ?? (cid ? customersById[cid] : undefined);
+      byId.set(r.id, {
+        customer_id: cid ?? undefined,
+        customer: customer,
+        customer_name: getBestCustomerNameFromEntity(customer) || full?.customer_name || full?.customerName || full?.bill_for || full?.billFor || undefined,
+      });
+    }
+  }
+
+  return rows.map((inv: any) => {
+    const id = getInvoiceId(inv);
+    if (!id || !byId.has(id)) return inv;
+    const extra = byId.get(id)!;
+    return { ...inv, ...extra, customer: extra.customer ?? inv.customer, customer_id: extra.customer_id ?? inv.customer_id };
+  });
+};
 
 const RecallInvoice = ({ onClose, onSelect }: RecallInvoiceProps) => {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -211,7 +273,7 @@ customersArr.forEach((c: any) => {
     first_name: c?.first_name ?? c?.firstName ?? nested?.first_name ?? nested?.firstName ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName ?? c?.name ?? nested?.name ?? nested?.full_name ?? "",
     last_name: c?.last_name ?? c?.lastName ?? nested?.last_name ?? nested?.lastName ?? "",
     full_name: c?.full_name ?? c?.fullName ?? nested?.full_name ?? nested?.fullName ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName ?? c?.name ?? nested?.name ?? "",
-    name: c?.name ?? nested?.name ?? c?.full_name ?? nested?.full_name ?? c?.customer_name ?? "",
+    name: getBestCustomerNameFromEntity(c) || getBestCustomerNameFromEntity(nested) || (c?.name ?? nested?.name ?? c?.full_name ?? nested?.full_name ?? c?.customer_name ?? ""),
   };
 });
 setCustomersById(map);
@@ -251,7 +313,8 @@ setCustomersById(map);
         return getInvoiceNoNumeric(b) - getInvoiceNoNumeric(a);
       });
 
-      setInvoices(recallableOnly);
+      const enrichedRecallables = await enrichInvoicesWithCustomerNames(recallableOnly as any[], map);
+      setInvoices(enrichedRecallables as Invoice[]);
     } catch (err) {
       console.error("Error fetching invoices:", err);
       setInvoices([]);

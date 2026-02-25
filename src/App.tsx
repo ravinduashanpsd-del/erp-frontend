@@ -5,6 +5,7 @@ import LoginPage from "./pages/LoginPage";
 import MainMenu from "./pages/MainMenu";
 import PosMainMenu from "./pages/PosMainMenu";
 import ProtectedRoute from "./components/ProtectedRoute";
+import SystemMessageProvider from "./components/SystemMessageProvider";
 
 function App() {
   // ✅ Your screens were designed in 1200 x 1920.
@@ -47,6 +48,7 @@ function App() {
 
   return (
     <BrowserRouter>
+      <SystemMessageProvider>
       <div className="app-scale-container">
         <div className="app-scale-outer" style={outerStyle}>
           <div className="app-scale-inner" style={innerStyle}>
@@ -74,6 +76,7 @@ function App() {
           </div>
         </div>
       </div>
+      </SystemMessageProvider>
     </BrowserRouter>
   );
 }
