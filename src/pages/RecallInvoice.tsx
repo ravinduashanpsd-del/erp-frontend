@@ -156,6 +156,9 @@ const fetchAllCustomers = async () => {
   const LIMIT = 200;
   const all: any[] = [];
 
+  const seenIds = new Set<number>();
+  let stagnantPages = 0;
+
   for (let page = 1; page <= 50; page++) {
     const res = await getCustomers(page, LIMIT, "");
     const d = res.data;
@@ -169,8 +172,22 @@ const fetchAllCustomers = async () => {
 
     if (!arr || arr.length === 0) break;
 
-    all.push(...arr);
-    if (arr.length < LIMIT) break;
+    let addedThisPage = 0;
+    for (const c of arr) {
+      const id = Number(c?.id ?? c?.customer_id ?? c?.customerId);
+      if (Number.isFinite(id) && id > 0) {
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+      }
+      all.push(c);
+      addedThisPage++;
+    }
+
+    stagnantPages = addedThisPage === 0 ? stagnantPages + 1 : 0;
+
+    const totalPages = Number(d?.total_pages ?? d?.data?.total_pages ?? d?.meta?.totalPages ?? d?.meta?.last_page ?? d?.last_page ?? 0);
+    if (Number.isFinite(totalPages) && totalPages > 0 && page >= totalPages) break;
+    if (stagnantPages >= 2) break;
   }
 
   return all;
@@ -187,12 +204,14 @@ customersArr.forEach((c: any) => {
   const id = Number(c?.id ?? c?.customer_id ?? c?.customerId);
   if (!Number.isFinite(id) || id <= 0) return;
 
+  const nested = c?.customer ?? c?.profile ?? c?.user ?? {};
   map[id] = {
     ...c,
     id,
-    first_name: c?.first_name ?? c?.firstName ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName ?? c?.name ?? "",
-    last_name: c?.last_name ?? c?.lastName ?? "",
-    full_name: c?.full_name ?? c?.fullName ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName ?? c?.name ?? "",
+    first_name: c?.first_name ?? c?.firstName ?? nested?.first_name ?? nested?.firstName ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName ?? c?.name ?? nested?.name ?? nested?.full_name ?? "",
+    last_name: c?.last_name ?? c?.lastName ?? nested?.last_name ?? nested?.lastName ?? "",
+    full_name: c?.full_name ?? c?.fullName ?? nested?.full_name ?? nested?.fullName ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName ?? c?.name ?? nested?.name ?? "",
+    name: c?.name ?? nested?.name ?? c?.full_name ?? nested?.full_name ?? c?.customer_name ?? "",
   };
 });
 setCustomersById(map);

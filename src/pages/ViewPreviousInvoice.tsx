@@ -120,7 +120,10 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
         const fetchAllCustomers = async () => {
           const LIMIT = 200;
           const all: any[] = [];
-          for (let page = 1; page <= 30; page++) {
+          const seenIds = new Set<number>();
+          let stagnantPages = 0;
+
+          for (let page = 1; page <= 50; page++) {
             const cres = await getCustomers(page, LIMIT, "");
             const d = cres.data;
             const arr =
@@ -131,8 +134,22 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
               Array.isArray(d?.data?.data) ? d.data.data :
               [];
             if (!Array.isArray(arr) || arr.length === 0) break;
-            all.push(...arr);
-            if (arr.length < LIMIT) break;
+
+            let addedThisPage = 0;
+            for (const c of arr) {
+              const id = Number(c?.id ?? c?.customer_id ?? c?.customerId);
+              if (Number.isFinite(id) && id > 0) {
+                if (seenIds.has(id)) continue;
+                seenIds.add(id);
+              }
+              all.push(c);
+              addedThisPage++;
+            }
+
+            stagnantPages = addedThisPage === 0 ? stagnantPages + 1 : 0;
+            const totalPages = Number(d?.total_pages ?? d?.data?.total_pages ?? d?.meta?.totalPages ?? d?.meta?.last_page ?? d?.last_page ?? 0);
+            if (Number.isFinite(totalPages) && totalPages > 0 && page >= totalPages) break;
+            if (stagnantPages >= 2) break;
           }
           return all;
         };
@@ -143,7 +160,14 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
         allCustomers.forEach((c: any) => {
           const id = Number(c?.id ?? c?.customer_id ?? c?.customerId);
           if (!Number.isFinite(id) || id <= 0) return;
-          cmap[id] = c;
+          const nested = c?.customer ?? c?.profile ?? c?.user ?? {};
+          cmap[id] = {
+            ...c,
+            name: c?.name ?? nested?.name ?? c?.full_name ?? nested?.full_name ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName,
+            full_name: c?.full_name ?? c?.fullName ?? nested?.full_name ?? nested?.fullName ?? c?.name ?? nested?.name ?? c?.customer_name ?? c?.customerName,
+            first_name: c?.first_name ?? c?.firstName ?? nested?.first_name ?? nested?.firstName ?? c?.name ?? nested?.name ?? "",
+            last_name: c?.last_name ?? c?.lastName ?? nested?.last_name ?? nested?.lastName ?? "",
+          };
         });
         setCustomersById(cmap);
 

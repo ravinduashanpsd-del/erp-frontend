@@ -80,6 +80,40 @@ const incrementInvoiceNo = (invoiceNo?: string | null) => {
   return `${parts.prefix}${next}`;
 };
 
+const extractInvoiceRowsFromAny = (data: any): any[] => {
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== "object") return [];
+
+  const directCandidates = [
+    data?.data,
+    data?.invoices,
+    data?.invoice,
+    data?.rows,
+    data?.results,
+    data?.items,
+    data?.payload,
+  ];
+  for (const c of directCandidates) {
+    if (Array.isArray(c)) return c;
+  }
+
+  for (const v of Object.values(data)) {
+    if (Array.isArray(v)) {
+      const first = v[0];
+      if (!first || typeof first === "object") return v as any[];
+    }
+  }
+
+  for (const v of Object.values(data)) {
+    if (v && typeof v === "object") {
+      const nested = extractInvoiceRowsFromAny(v);
+      if (nested.length) return nested;
+    }
+  }
+
+  return [];
+};
+
 const pickLatestInvoiceNoPreview = (rows: any[]): string | null => {
   if (!Array.isArray(rows) || rows.length === 0) return null;
   const getTime = (inv: any) => {
@@ -129,7 +163,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       try {
         const res = await getInvoices();
         const data = res.data;
-        const list = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.data?.data) ? data.data.data : [];
+        const list = extractInvoiceRowsFromAny(data);
         const preview = pickLatestInvoiceNoPreview(list);
         if (!cancelled && preview) setNextInvoicePreviewNo(preview);
       } catch (e) {
@@ -580,7 +614,8 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
           if (normalized) return normalized;
         }
 
-        if (arr.length < LIMIT) break;
+        const totalPages = Number(d?.total_pages ?? d?.data?.total_pages ?? d?.meta?.totalPages ?? d?.meta?.last_page ?? d?.last_page ?? 0);
+        if (Number.isFinite(totalPages) && totalPages > 0 && page >= totalPages) break;
       }
     } catch (e) {
       console.warn("Failed to fetch customer for recalled invoice", e);
