@@ -8,7 +8,7 @@ import SendInvoiceConfirm from "./SendInvoiceConfirm";
 import RemoveItemConfirm from "./RemoveItemConfirm";
 import type { Customer } from "../api/customers";
 import type { InvoiceItem } from "../api/items";
-import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice, markInvoiceRecalled } from "../api/invoice";
+import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice } from "../api/invoice";
 
 /* ================= TOKEN HELPERS ================= */
 const getUserFromToken = () => {
@@ -409,20 +409,6 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     return null;
   };
 
-  const markOriginalInvoiceAsRecalled = async (invoiceId?: number | null) => {
-    const id = Number(invoiceId);
-    if (!Number.isFinite(id) || id <= 0) return;
-    if (recalledStatusMarkedIdsRef.current.has(id)) return;
-
-    try {
-      await markInvoiceRecalled(id);
-      recalledStatusMarkedIdsRef.current.add(id);
-    } catch (e) {
-      // Non-blocking: backend may not yet support RECALLED enum
-      console.warn("Could not mark original invoice as RECALLED:", e);
-    }
-  };
-
   const applyRecalledInvoiceToForm = async (invoice: any) => {
     if (!invoice) return;
 
@@ -442,8 +428,6 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     setDiscountAmount(Number(invoice?.discount_amount || 0));
     setQty((invoice?.next_box_number ?? 0).toString());
 
-    // best effort audit update
-    await markOriginalInvoiceAsRecalled(recalledId);
   };
 
   // If user recalled from "View Previous Invoice", that screen stores the selected invoice in localStorage.
@@ -456,7 +440,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       localStorage.removeItem(RECALL_INVOICE_STORAGE_KEY);
       localStorage.removeItem(RECALL_OPEN_CREATE_KEY);
 
-      // fire-and-forget; UI will still update if status mark fails
+      // Apply recalled invoice data from localStorage (saved by View Previous Invoice screen)
       void applyRecalledInvoiceToForm(stored);
     } catch (e) {
       console.warn("Failed to load recalled invoice from storage:", e);
@@ -599,11 +583,6 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       await Promise.all(itemPromises);
 
       await sendInvoice(newInvoiceId);
-
-      // Retry best-effort status mark after successful new invoice creation (useful if first attempt failed)
-      if (previousInvoiceId) {
-        void markOriginalInvoiceAsRecalled(previousInvoiceId);
-      }
 
       alert(`Invoice #${newInvoiceNo} sent to cashier successfully!`);
 

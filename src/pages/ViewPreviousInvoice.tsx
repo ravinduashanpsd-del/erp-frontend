@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import RecallInvoiceConfirm from "./RecallInvoiceConfirm";
-import { getInvoiceById, getInvoices, markInvoiceRecalled } from "../api/invoice";
+import { getInvoiceById, getInvoices } from "../api/invoice";
 import Pagination from "../components/Pagination";
 
 interface ViewPreviousInvoiceProps {
@@ -103,18 +103,6 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
       // Fetch full invoice details (items + customer) before sending to Create Invoice screen
       const res = await getInvoiceById(selectedInvoice.id);
       const fullInvoice = (res.data?.data ?? res.data) || selectedInvoice;
-
-      // Best-effort status update for audit clarity; do not block recall if backend enum is not ready
-      try {
-        await markInvoiceRecalled(selectedInvoice.id);
-        setInvoices((prev) =>
-          prev.map((inv) =>
-            inv.id === selectedInvoice.id ? { ...inv, status: "RECALLED" } : inv
-          )
-        );
-      } catch (statusErr) {
-        console.warn("Could not update original invoice status to RECALLED:", statusErr);
-      }
 
       localStorage.setItem(RECALL_INVOICE_STORAGE_KEY, JSON.stringify(fullInvoice));
       localStorage.setItem(RECALL_OPEN_CREATE_KEY, "1");
