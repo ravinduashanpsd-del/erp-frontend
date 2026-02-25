@@ -2,6 +2,7 @@
 export interface InvoiceItem {
   id: number;
   stockId?: number;
+  invoiceItemId?: number;
   sku: string;
   name: string;
   description: string;

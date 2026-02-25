@@ -8,7 +8,7 @@ import SendInvoiceConfirm from "./SendInvoiceConfirm";
 import RemoveItemConfirm from "./RemoveItemConfirm";
 import type { Customer } from "../api/customers";
 import type { InvoiceItem } from "../api/items";
-import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice } from "../api/invoice";
+import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice, updateInvoiceItem, deleteInvoiceItem } from "../api/invoice";
 
 /* ================= TOKEN HELPERS ================= */
 const getUserFromToken = () => {
@@ -94,6 +94,12 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
   // Keep the last saved draft invoice id so we can cancel it if needed.
   const lastDraftInvoiceIdRef = useRef<number | null>(null);
 
+  // Keep the original recalled invoice item line ids so we can update the SAME invoice without creating a new one.
+  const recalledOriginalItemIdsRef = useRef<number[]>([]);
+
+  // Remember original recalled invoice number for stable display after re-send.
+  const recalledOriginalInvoiceNoRef = useRef<string | null>(null);
+
   // Keep the latest invoice draft state for unmount auto-save.
   const draftSnapshotRef = useRef({
     selectedCustomer: null as Customer | null,
@@ -169,8 +175,23 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
         next_box_number: boxQty,
       };
 
-      // If we recalled an invoice, keep the reference for audit/history.
-      if (snap.previousInvoiceId) basePayload.previous_invoice_id = snap.previousInvoiceId;
+      // If user is editing a recalled invoice, do NOT create a new invoice draft.
+      // Update the same invoice header only (keeps invoice count and number stable).
+      if (snap.previousInvoiceId) {
+        try {
+          await updateInvoice(snap.previousInvoiceId, basePayload);
+        } catch (e: any) {
+          await updateInvoice(snap.previousInvoiceId, { ...basePayload, status: "PENDING" });
+        }
+
+        lastDraftInvoiceIdRef.current = null;
+
+        hasFinalizedRef.current = true;
+        localStorage.removeItem("pos_local_draft_invoice");
+        localStorage.removeItem(RECALL_INVOICE_STORAGE_KEY);
+        localStorage.removeItem(RECALL_OPEN_CREATE_KEY);
+        return;
+      }
 
       let invoiceResponse;
       try {
@@ -316,6 +337,12 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
           stockObj?.stockId,
         ) || undefined;
 
+      const invoiceItemId =
+        pickNumber(
+          item?.invoice_item_id,
+          item?.invoiceItemId,
+        ) || undefined;
+
       const displayId =
         pickNumber(
           stockId,
@@ -374,6 +401,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       return {
         id: displayId,
         stockId,
+        invoiceItemId,
         sku,
         name,
         description,
@@ -385,21 +413,41 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
   const resolveRecalledCustomer = (invoice: any): Customer | null => {
     const c = invoice?.customer;
+    const billForFallback =
+      invoice?.bill_for ??
+      invoice?.billFor ??
+      invoice?.customer_name ??
+      invoice?.customerName ??
+      "";
+
     if (c && typeof c === "object") {
+      const fullName =
+        c?.full_name ??
+        c?.fullName ??
+        c?.customer_name ??
+        c?.customerName ??
+        c?.name ??
+        billForFallback ??
+        "";
+
+      const first = c?.first_name ?? c?.firstName ?? (typeof fullName === "string" ? fullName : "") ?? "";
+      const last = c?.last_name ?? c?.lastName ?? "";
+      const cid = Number(c?.id ?? invoice?.customer_id ?? 0);
+
       return {
-        id: Number(c?.id ?? invoice?.customer_id ?? 0),
-        first_name: c?.first_name ?? c?.firstName ?? c?.name ?? "",
-        last_name: c?.last_name ?? c?.lastName ?? "",
+        id: Number.isFinite(cid) && cid > 0 ? cid : 0,
+        first_name: String(first || "").trim() || (cid ? `Customer ${cid}` : "Customer"),
+        last_name: String(last || "").trim(),
         telephone: c?.telephone ?? c?.phone,
       };
     }
 
     const fallbackId = Number(invoice?.customer_id ?? 0);
-    if (fallbackId > 0) {
+    if (fallbackId > 0 || billForFallback) {
       return {
-        id: fallbackId,
-        first_name: invoice?.customer_first_name ?? invoice?.customerFirstName ?? "",
-        last_name: invoice?.customer_last_name ?? invoice?.customerLastName ?? "",
+        id: Number.isFinite(fallbackId) && fallbackId > 0 ? fallbackId : 0,
+        first_name: String(invoice?.customer_first_name ?? invoice?.customerFirstName ?? billForFallback ?? "").trim() || (fallbackId ? `Customer ${fallbackId}` : "Customer"),
+        last_name: String(invoice?.customer_last_name ?? invoice?.customerLastName ?? "").trim(),
       };
     }
 
@@ -416,14 +464,23 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       setPreviousInvoiceId(null);
     }
 
-    setInvoiceNumber(invoice?.invoice_no || (Number.isFinite(recalledId) ? `INV-${recalledId}` : "AUTO"));
+    const recalledInvoiceNo = invoice?.invoice_no || (Number.isFinite(recalledId) ? `INV-${recalledId}` : "AUTO");
+    setInvoiceNumber(recalledInvoiceNo);
+    recalledOriginalInvoiceNoRef.current = recalledInvoiceNo;
     setLastCreatedInvoiceNo(null);
 
-    setSelectedCustomer(resolveRecalledCustomer(invoice));
-    setInvoiceItems(mapRecalledInvoiceItems(invoice));
+    const recalledCustomer = resolveRecalledCustomer(invoice);
+    const mappedItems = mapRecalledInvoiceItems(invoice);
+    recalledOriginalItemIdsRef.current = mappedItems
+      .map((it) => Number((it as any).invoiceItemId || 0))
+      .filter((id) => Number.isFinite(id) && id > 0);
+
+    setSelectedCustomer(recalledCustomer);
+    setInvoiceItems(mappedItems);
     setPaidAmount(Number(invoice?.paid_amount || 0));
     setDiscountAmount(Number(invoice?.discount_amount || 0));
-    setQty((invoice?.next_box_number ?? 0).toString());
+    const recalledQty = Number(invoice?.next_box_number ?? 0);
+    setQty(String(Number.isFinite(recalledQty) && recalledQty > 0 ? recalledQty : 1));
 
   };
 
@@ -454,6 +511,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
   /* ================= AUTO GENERATE INVOICE NO ================= */
   useEffect(() => {
+    if (previousInvoiceId) return;
     if (!lastCreatedInvoiceNo && selectedCustomer && invoiceItems.length > 0 && invoiceNumber === "AUTO") {
       const timestamp = Math.floor(Date.now() / 1000).toString().slice(-4);
       setInvoiceNumber(`INV-${timestamp}`);
@@ -461,7 +519,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     else if (!lastCreatedInvoiceNo && (!selectedCustomer || invoiceItems.length === 0) && invoiceNumber !== "AUTO") {
       setInvoiceNumber("AUTO");
     }
-  }, [selectedCustomer, invoiceItems, invoiceNumber, lastCreatedInvoiceNo]);
+  }, [selectedCustomer, invoiceItems, invoiceNumber, lastCreatedInvoiceNo, previousInvoiceId]);
 
   const handleRecallInvoice = async (invoice: any) => {
     const invoiceId = Number(invoice?.id ?? invoice?.invoice_id ?? invoice?.invoiceId ?? 0) || undefined;
@@ -501,6 +559,89 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     setShowRecall(false);
   };
 
+  const normalizeInvoiceDetailForSync = (invoice: any) => {
+    const rawItems =
+      invoice?.invoice_items ??
+      invoice?.items ??
+      invoice?.invoiceItems ??
+      invoice?.data?.invoice_items ??
+      invoice?.data?.items ??
+      [];
+
+    const arr = Array.isArray(rawItems) ? rawItems : [];
+    return arr.map((it: any) => ({
+      invoiceItemId: Number(it?.invoice_item_id ?? it?.invoiceItemId ?? it?.id ?? 0) || undefined,
+      stockId: Number(it?.stock_id ?? it?.stockId ?? it?.stock?.id ?? 0) || undefined,
+      quantity: Number(it?.quantity ?? it?.qty ?? 0) || 0,
+    }));
+  };
+
+  const syncRecalledInvoiceItemsBestEffort = async (invoiceId: number) => {
+    let existing: Array<{ invoiceItemId?: number; stockId?: number; quantity: number }> = [];
+
+    try {
+      const detailRes = await getInvoiceById(invoiceId);
+      const detail = detailRes.data?.data?.invoice ?? detailRes.data?.data ?? detailRes.data?.invoice ?? detailRes.data;
+      existing = normalizeInvoiceDetailForSync(detail);
+    } catch (e) {
+      console.warn("Failed to load existing invoice items for sync; using local recalled snapshot only", e);
+    }
+
+    const existingById = new Map<number, any>();
+    const existingByStock = new Map<number, any>();
+    for (const line of existing) {
+      if (line.invoiceItemId) existingById.set(line.invoiceItemId, line);
+      if (line.stockId) existingByStock.set(line.stockId, line);
+    }
+
+    // Delete removed lines (only if backend supports delete endpoint)
+    const currentIds = new Set(
+      invoiceItems.map((it: any) => Number(it?.invoiceItemId || 0)).filter((id) => Number.isFinite(id) && id > 0)
+    );
+
+    const originalIds = new Set(
+      (recalledOriginalItemIdsRef.current || []).filter((id) => Number.isFinite(id) && id > 0)
+    );
+
+    for (const removedId of originalIds) {
+      if (!currentIds.has(removedId)) {
+        try {
+          await deleteInvoiceItem(invoiceId, removedId);
+        } catch (e) {
+          console.warn(`Delete invoice item ${removedId} not supported / failed`, e);
+        }
+      }
+    }
+
+    // Update existing lines or add new ones
+    for (const uiItem of invoiceItems as any[]) {
+      const qtyNum = Number(uiItem?.qty || 0) || 1;
+      const stockId = Number(uiItem?.stockId || uiItem?.id || 0) || undefined;
+      const lineId = Number(uiItem?.invoiceItemId || 0) || undefined;
+      const payload = {
+        stock_id: stockId,
+        quantity: qtyNum,
+        selling_price: Number(uiItem?.unitPrice || 0) || 0,
+        discount_type: discountType.toUpperCase(),
+        discount_amount: 0,
+      };
+
+      const matchedExisting = (lineId && existingById.get(lineId)) || (stockId && existingByStock.get(stockId));
+      const targetLineId = lineId || matchedExisting?.invoiceItemId;
+
+      if (targetLineId) {
+        try {
+          await updateInvoiceItem(invoiceId, targetLineId, payload);
+          continue;
+        } catch (e) {
+          console.warn(`Update invoice item ${targetLineId} failed; trying add fallback`, e);
+        }
+      }
+
+      await addInvoiceItem(invoiceId, payload as any);
+    }
+  };
+
   /* ================= SEND INVOICE ================= */
   const handleSendInvoice = async () => {
     if (!selectedCustomer) {
@@ -533,7 +674,6 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
         customer_id: selectedCustomer.id,
         created_user_id: userId,
         status: "PENDING",
-        previous_invoice_id: previousInvoiceId || null,
         total_amount: totalAmount,
         discount_type: discountType.toUpperCase(),
         next_box_number: boxQty
@@ -542,46 +682,57 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       if (paidAmount > 0) invoicePayload.paid_amount = paidAmount;
       if (discountAmount > 0) invoicePayload.discount_amount = discountAmount;
 
-      console.log("Creating invoice with payload:", invoicePayload);
+      let sentInvoiceId: number;
+      let sentInvoiceNo: string;
 
-      const invoiceResponse = await createInvoice(invoicePayload);
+      if (previousInvoiceId) {
+        // ✅ Recall flow: UPDATE the same invoice record (keep same invoice number / count)
+        sentInvoiceId = previousInvoiceId;
 
-      console.log("Invoice creation response:", invoiceResponse);
+        console.log("Updating recalled invoice (same invoice id):", sentInvoiceId, invoicePayload);
+        await updateInvoice(sentInvoiceId, invoicePayload);
 
-      const responseData = invoiceResponse.data?.data || invoiceResponse.data;
+        await syncRecalledInvoiceItemsBestEffort(sentInvoiceId);
+        await sendInvoice(sentInvoiceId);
 
-      if (!responseData) {
-        throw new Error("No response data from server");
-      }
+        sentInvoiceNo = recalledOriginalInvoiceNoRef.current || invoiceNumber || `INV-${sentInvoiceId}`;
+      } else {
+        // ✅ Normal create flow: create a new invoice record
+        console.log("Creating invoice with payload:", invoicePayload);
+        const invoiceResponse = await createInvoice(invoicePayload);
+        console.log("Invoice creation response:", invoiceResponse);
 
-      const newInvoiceId = responseData.id;
-      const newInvoiceNo = responseData.invoice_no || `INV-${newInvoiceId}`;
+        const responseData = invoiceResponse.data?.data || invoiceResponse.data;
+        if (!responseData) throw new Error("No response data from server");
 
-      if (!newInvoiceId) {
-        throw new Error("Invoice ID not returned");
+        const newInvoiceId = responseData.id;
+        const newInvoiceNo = responseData.invoice_no || `INV-${newInvoiceId}`;
+        if (!newInvoiceId) throw new Error("Invoice ID not returned");
+
+        sentInvoiceId = newInvoiceId;
+        sentInvoiceNo = newInvoiceNo;
+
+        const itemPromises = invoiceItems.map(async (item: InvoiceItem) => {
+          const itemPayload = {
+            stock_id: item.stockId || item.id,
+            quantity: item.qty,
+            selling_price: item.unitPrice,
+            discount_type: discountType.toUpperCase(),
+            discount_amount: 0
+          };
+          console.log("Adding invoice item:", itemPayload);
+          return addInvoiceItem(newInvoiceId, itemPayload);
+        });
+
+        await Promise.all(itemPromises);
+        await sendInvoice(newInvoiceId);
       }
 
       // Set the invoice number and remember it
-      setInvoiceNumber(newInvoiceNo);
-      setLastCreatedInvoiceNo(newInvoiceNo);
+      setInvoiceNumber(sentInvoiceNo);
+      setLastCreatedInvoiceNo(sentInvoiceNo);
 
-      const itemPromises = invoiceItems.map(async (item: InvoiceItem) => {
-        const itemPayload = {
-          stock_id: item.stockId || item.id,
-          quantity: item.qty,
-          selling_price: item.unitPrice,
-          discount_type: discountType.toUpperCase(),
-          discount_amount: 0
-        };
-        console.log("Adding invoice item:", itemPayload);
-        return addInvoiceItem(newInvoiceId, itemPayload);
-      });
-
-      await Promise.all(itemPromises);
-
-      await sendInvoice(newInvoiceId);
-
-      alert(`Invoice #${newInvoiceNo} sent to cashier successfully!`);
+      alert(`Invoice #${sentInvoiceNo} sent to cashier successfully!`);
 
       // Mark as finalized so auto-save does not run
       hasFinalizedRef.current = true;
@@ -596,6 +747,8 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       setDiscountAmount(0);
       setPaidAmount(0);
       setPreviousInvoiceId(null);
+      recalledOriginalInvoiceNoRef.current = null;
+      recalledOriginalItemIdsRef.current = [];
       // Don't reset invoiceNumber here - keep showing the last created invoice number
       setShowSendConfirm(false);
 
@@ -640,6 +793,8 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       setDiscountAmount(0);
       setPaidAmount(0);
       setPreviousInvoiceId(null);
+      recalledOriginalInvoiceNoRef.current = null;
+      recalledOriginalItemIdsRef.current = [];
       setInvoiceNumber("AUTO");
       setLastCreatedInvoiceNo(null);
       setShowCancelConfirm(false);
@@ -776,7 +931,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
                 <span className="mr-2">:</span>
                 <span className="text-blue-800 font-bold truncate">
                   {selectedCustomer
-                    ? `${selectedCustomer.first_name || ''} ${selectedCustomer.last_name || ''}`.trim()
+                    ? (`${selectedCustomer.first_name || ''} ${selectedCustomer.last_name || ''}`.trim() || (selectedCustomer as any)?.name || (selectedCustomer as any)?.full_name || (selectedCustomer.id ? `Customer ${selectedCustomer.id}` : "Select Customer"))
                     : "Select Customer"}
                 </span>
               </div>

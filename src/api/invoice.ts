@@ -27,6 +27,22 @@ export const addInvoiceItem = (
   }
 ) => api.post(`/pos/invoice/${invoiceId}/item`, data);
 
+
+export const updateInvoiceItem = (
+  invoiceId: number,
+  invoiceItemId: number,
+  data: {
+    stock_id?: number;
+    quantity?: number;
+    selling_price?: number;
+    discount_type?: string;
+    discount_amount?: number;
+  }
+) => api.patch(`/pos/invoice/${invoiceId}/item/${invoiceItemId}`, data);
+
+export const deleteInvoiceItem = (invoiceId: number, invoiceItemId: number) =>
+  api.delete(`/pos/invoice/${invoiceId}/item/${invoiceItemId}`);
+
 export const sendInvoice = (invoiceId: number) =>
   api.patch(`/pos/invoice/${invoiceId}`, {
     status: "PENDING"
