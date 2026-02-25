@@ -269,19 +269,121 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       invoice?.invoice_items ??
       invoice?.items ??
       invoice?.invoiceItems ??
+      invoice?.data?.invoice_items ??
+      invoice?.data?.items ??
       [];
 
     if (!Array.isArray(sourceItems)) return [];
 
-    return sourceItems.map((item: any, idx: number) => ({
-      id: Number(item?.stock_id ?? item?.stockId ?? item?.stock?.id ?? item?.id ?? idx + 1),
-      stockId: Number(item?.stock_id ?? item?.stockId ?? item?.stock?.id ?? item?.id ?? 0) || undefined,
-      sku: item?.stock?.sku ?? item?.sku ?? item?.item_sku ?? "N/A",
-      name: item?.stock?.name ?? item?.name ?? item?.item_name ?? "Unknown Item",
-      description: item?.stock?.description ?? item?.description ?? "",
-      unitPrice: Number(item?.selling_price ?? item?.unitPrice ?? item?.price ?? 0) || 0,
-      qty: Math.max(1, Number(item?.quantity ?? item?.qty ?? 1) || 1),
-    }));
+    const pickString = (...values: any[]) => {
+      for (const v of values) {
+        if (typeof v === "string" && v.trim()) return v.trim();
+      }
+      return "";
+    };
+
+    const pickNumber = (...values: any[]) => {
+      for (const v of values) {
+        const n = Number(v);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return 0;
+    };
+
+    return sourceItems.map((item: any, idx: number) => {
+      const stockObj =
+        item?.stock ??
+        item?.stock_item ??
+        item?.stockItem ??
+        item?.inventory_stock ??
+        item?.inventoryStock ??
+        null;
+
+      const nestedItem =
+        item?.item ??
+        item?.product ??
+        item?.product_item ??
+        item?.productItem ??
+        item?.store_item ??
+        item?.storeItem ??
+        stockObj?.item ??
+        stockObj?.product ??
+        null;
+
+      const stockId =
+        pickNumber(
+          item?.stock_id,
+          item?.stockId,
+          stockObj?.id,
+          stockObj?.stock_id,
+          stockObj?.stockId,
+        ) || undefined;
+
+      const displayId =
+        pickNumber(
+          stockId,
+          item?.id,
+          item?.invoice_item_id,
+          item?.invoiceItemId,
+          nestedItem?.id,
+          item?.item_id,
+          item?.itemId,
+          idx + 1,
+        ) || (idx + 1);
+
+      const sku = pickString(
+        item?.sku,
+        item?.item_sku,
+        item?.itemSku,
+        stockObj?.sku,
+        nestedItem?.sku,
+        nestedItem?.code,
+        item?.code,
+      ) || "N/A";
+
+      const name = pickString(
+        item?.name,
+        item?.item_name,
+        item?.itemName,
+        stockObj?.name,
+        nestedItem?.name,
+        nestedItem?.item_name,
+        item?.description,
+        nestedItem?.description,
+      ) || "Unknown Item";
+
+      const description = pickString(
+        item?.description,
+        stockObj?.description,
+        nestedItem?.description,
+      );
+
+      const unitPrice = Number(
+        item?.selling_price ??
+        item?.sellingPrice ??
+        item?.unit_price ??
+        item?.unitPrice ??
+        item?.price ??
+        stockObj?.stock_price ??
+        stockObj?.retail_price ??
+        stockObj?.selling_price ??
+        nestedItem?.selling_price ??
+        nestedItem?.price ??
+        0
+      ) || 0;
+
+      const qtyVal = Number(item?.quantity ?? item?.qty ?? item?.item_qty ?? 1);
+
+      return {
+        id: displayId,
+        stockId,
+        sku,
+        name,
+        description,
+        unitPrice,
+        qty: Math.max(1, Number.isFinite(qtyVal) ? qtyVal : 1),
+      };
+    });
   };
 
   const resolveRecalledCustomer = (invoice: any): Customer | null => {
@@ -381,13 +483,36 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
   }, [selectedCustomer, invoiceItems, invoiceNumber, lastCreatedInvoiceNo]);
 
   const handleRecallInvoice = async (invoice: any) => {
+    const invoiceId = Number(invoice?.id ?? invoice?.invoice_id ?? invoice?.invoiceId ?? 0) || undefined;
+
+    const hasItemsInPayload = (payload: any) => {
+      const arr =
+        payload?.invoice_items ??
+        payload?.items ??
+        payload?.invoiceItems ??
+        payload?.data?.invoice_items ??
+        payload?.data?.items ??
+        [];
+      return Array.isArray(arr) && arr.length > 0;
+    };
+
     try {
-      if (!invoice?.invoice_items || invoice.invoice_items.length === 0) {
-        const res = await getInvoiceById(invoice.id);
-        invoice = (res.data?.data ?? res.data) || invoice;
+      if (!hasItemsInPayload(invoice) && invoiceId) {
+        const res = await getInvoiceById(invoiceId);
+        const fromApi =
+          res.data?.data?.invoice ??
+          res.data?.data ??
+          res.data?.invoice ??
+          res.data;
+        invoice = fromApi || invoice;
       }
     } catch (e) {
       console.warn("Could not fetch full invoice for recall", e);
+    }
+
+    const mapped = mapRecalledInvoiceItems(invoice);
+    if (mapped.length === 0) {
+      throw new Error("This invoice has no recallable items or item details could not be loaded.");
     }
 
     console.log("Recalled invoice for state update:", invoice);

@@ -5,7 +5,7 @@ import Pagination from "../components/Pagination";
 
 interface RecallInvoiceProps {
   onClose: () => void;
-  onSelect?: (invoice: Invoice) => void;
+  onSelect?: (invoice: Invoice) => void | Promise<void>;
 }
 
 interface Invoice {
@@ -57,6 +57,24 @@ const getCustomerIdFromInvoice = (inv: any): number | null => {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : null;
 };
+
+const getInvoiceId = (inv: any): number | null => {
+  const raw = inv?.id ?? inv?.invoice_id ?? inv?.invoiceId;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+const getInvoiceItemsArray = (inv: any): any[] => {
+  const arr =
+    inv?.invoice_items ??
+    inv?.items ??
+    inv?.invoiceItems ??
+    inv?.data?.invoice_items ??
+    inv?.data?.items ??
+    [];
+  return Array.isArray(arr) ? arr : [];
+};
+
 
 
 const getCustomerName = (inv: any, customersById: Record<number, any>) => {
@@ -207,7 +225,7 @@ setCustomersById(map);
 }, []);
 
   const filteredInvoices = invoices.filter((invoice) =>
-    invoice.id.toString().includes(search) ||
+    (getInvoiceId(invoice)?.toString() || "").includes(search) ||
     (invoice.invoice_no && invoice.invoice_no.toLowerCase().includes(search.toLowerCase())) ||
     invoice.created_at.toLowerCase().includes(search.toLowerCase()) ||
     (getCustomerName(invoice, customersById).toLowerCase().includes(search.toLowerCase())) ||
@@ -238,27 +256,54 @@ setCustomersById(map);
     return;
   }
 
+  const selectedId = getInvoiceId(selectedInvoice);
+  if (!selectedId) {
+    alert("Selected invoice is invalid. Please refresh and try again.");
+    return;
+  }
+
   try {
     // ✅ fetch full invoice details (items + customer) before sending to CreateInvoice page
-    const res = await getInvoiceById(selectedInvoice.id);
+    const res = await getInvoiceById(selectedId);
 
-    const fullInvoice: any = (res.data?.data ?? res.data) || selectedInvoice;
+    const fullInvoice: any =
+      res.data?.data?.invoice ??
+      res.data?.data ??
+      res.data?.invoice ??
+      res.data ??
+      selectedInvoice;
+
+    // preserve id if backend wraps invoice with invoice_id only
+    if (!fullInvoice.id && selectedId) fullInvoice.id = selectedId;
 
     // attach customer if missing
-    fullInvoice.customer = fullInvoice.customer || customersById[fullInvoice.customer_id] || selectedInvoice.customer;
+    const customerId = getCustomerIdFromInvoice(fullInvoice) ?? getCustomerIdFromInvoice(selectedInvoice);
+    fullInvoice.customer =
+      fullInvoice.customer ||
+      (customerId ? customersById[customerId] : undefined) ||
+      selectedInvoice.customer;
+
+    // if backend omits invoice_items in the full endpoint, keep whatever we had
+    if (getInvoiceItemsArray(fullInvoice).length === 0 && getInvoiceItemsArray(selectedInvoice).length > 0) {
+      fullInvoice.invoice_items = getInvoiceItemsArray(selectedInvoice);
+    }
 
     if (onSelect) {
-      onSelect(fullInvoice);
+      await Promise.resolve(onSelect(fullInvoice));
     } else {
       alert(
-        `Invoice ${fullInvoice.invoice_no || `INV-${fullInvoice.id}`} recalled successfully!`
+        `Invoice ${fullInvoice.invoice_no || `INV-${selectedId}`} recalled successfully!`
       );
     }
 
     onClose();
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error recalling invoice:", err);
-    alert("Failed to recall invoice. Please try again.");
+    const msg =
+      err?.response?.data?.message ||
+      err?.message ||
+      "Failed to recall invoice. Please try again.";
+    alert(msg);
   }
 };
 
@@ -307,7 +352,7 @@ setCustomersById(map);
             {!loading &&
               paginatedInvoices.map((inv, i) => (
                 <div
-                  key={inv.id}
+                  key={getInvoiceId(inv) || `${startIndex + i}`}
                   onClick={() => setSelectedInvoice(inv)}
                   className={`grid grid-cols-5 text-[18px] sm:text-[26px] px-4 sm:px-6 py-3 sm:py-4 border-b-2 border-black/20 hover:bg-white/30 transition-colors cursor-pointer ${selectedInvoice?.id === inv.id ? "bg-green-300" : ""}`}
                 >
@@ -322,7 +367,7 @@ setCustomersById(map);
                     })}
                   </div>
                   <div className="font-semibold text-blue-700 text-center">
-                    {inv.invoice_no || `INV-${inv.id}`}
+                    {inv.invoice_no || `INV-${getInvoiceId(inv) || '?'}`}
                   </div>
                   <div className="text-center truncate">
                     {inv.created_user
