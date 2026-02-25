@@ -47,9 +47,19 @@ const getCustomerIdFromInvoice = (inv: any): number | null => {
   return Number.isFinite(n) && n > 0 ? n : null;
 };
 
+const isGenericCustomerLabel = (value?: string | null) => !!(value && /^customer\s*\d*$/i.test(String(value).trim()));
+
 const getInvoiceSortTime = (inv: any) => {
-  const t = new Date(inv?.updated_at || inv?.created_at || inv?.invoice_date || 0).getTime();
+  const t = new Date(inv?.created_at || inv?.invoice_date || inv?.updated_at || 0).getTime();
   return Number.isFinite(t) ? t : 0;
+};
+
+const getInvoiceSortTieBreaker = (inv: any) => {
+  const raw = String(inv?.invoice_no || "");
+  const m = raw.match(/(\d+)$/);
+  if (m) return Number(m[1]);
+  const id = Number(inv?.id ?? inv?.invoice_id ?? 0);
+  return Number.isFinite(id) ? id : 0;
 };
 
 const getInvoiceCustomerName = (inv: any, customersById: Record<number, any>) => {
@@ -71,7 +81,7 @@ const getInvoiceCustomerName = (inv: any, customersById: Record<number, any>) =>
     `${inv?.customer?.first_name || inv?.customer?.firstName || ""} ${inv?.customer?.last_name || inv?.customer?.lastName || ""}`.trim(),
   ].map(normalize).filter(Boolean);
 
-  const nonGeneric = candidates.find((v) => !/^customer\s*\d*$/i.test(v));
+  const nonGeneric = candidates.find((v) => !isGenericCustomerLabel(v));
   if (nonGeneric) return nonGeneric;
 
   const cid = getCustomerIdFromInvoice(inv);
@@ -81,7 +91,7 @@ const getInvoiceCustomerName = (inv: any, customersById: Record<number, any>) =>
       c?.full_name, c?.fullName, c?.customer_name, c?.customerName, c?.display_name, c?.displayName, c?.name,
       `${c?.first_name || c?.firstName || ""} ${c?.last_name || c?.lastName || ""}`.trim(),
     ].map(normalize).filter(Boolean);
-    const best = mappedCandidates.find((v) => !/^customer\s*\d*$/i.test(v));
+    const best = mappedCandidates.find((v) => !isGenericCustomerLabel(v));
     if (best) return best;
   }
 
@@ -145,7 +155,7 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
           Array.isArray(data?.data?.data) ? data.data.data :
           [];
 
-        const sorted = [...list].sort((a: any, b: any) => getInvoiceSortTime(b) - getInvoiceSortTime(a));
+        const sorted = [...list].sort((a: any, b: any) => { const dt = getInvoiceSortTime(b) - getInvoiceSortTime(a); return dt !== 0 ? dt : (getInvoiceSortTieBreaker(b) - getInvoiceSortTieBreaker(a)); });
         setInvoices(sorted as Invoice[]);
       } catch (err) {
         console.error("Failed to load invoices", err);
@@ -173,7 +183,7 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
       creator.includes(s) ||
       customer.includes(s)
     );
-  }).sort((a, b) => getInvoiceSortTime(b) - getInvoiceSortTime(a));
+  }).sort((a, b) => { const dt = getInvoiceSortTime(b) - getInvoiceSortTime(a); return dt !== 0 ? dt : (getInvoiceSortTieBreaker(b) - getInvoiceSortTieBreaker(a)); });
 
   // 🔹 Reset page when search changes
   useEffect(() => {

@@ -77,15 +77,17 @@ const getInvoiceItemsArray = (inv: any): any[] => {
 
 
 
+const isGenericCustomerLabel = (value?: string | null) => !!(value && /^customer\s*\d*$/i.test(String(value).trim()));
+
 const getCustomerName = (inv: any, customersById: Record<number, any>) => {
   // 1) If invoice already contains customer name (varies by backend)
   const direct = inv?.customer;
 
-  if (typeof direct === "string" && direct.trim()) return direct.trim();
-  if (typeof inv?.customer_name === "string" && inv.customer_name.trim()) return inv.customer_name.trim();
-  if (typeof inv?.customerName === "string" && inv.customerName.trim()) return inv.customerName.trim();
-  if (typeof inv?.customer_full_name === "string" && inv.customer_full_name.trim()) return inv.customer_full_name.trim();
-  if (typeof inv?.customerFullName === "string" && inv.customerFullName.trim()) return inv.customerFullName.trim();
+  if (typeof direct === "string" && direct.trim() && !isGenericCustomerLabel(direct)) return direct.trim();
+  if (typeof inv?.customer_name === "string" && inv.customer_name.trim() && !isGenericCustomerLabel(inv.customer_name)) return inv.customer_name.trim();
+  if (typeof inv?.customerName === "string" && inv.customerName.trim() && !isGenericCustomerLabel(inv.customerName)) return inv.customerName.trim();
+  if (typeof inv?.customer_full_name === "string" && inv.customer_full_name.trim() && !isGenericCustomerLabel(inv.customer_full_name)) return inv.customer_full_name.trim();
+  if (typeof inv?.customerFullName === "string" && inv.customerFullName.trim() && !isGenericCustomerLabel(inv.customerFullName)) return inv.customerFullName.trim();
 
   const directName = direct?.name || direct?.full_name || direct?.fullName || direct?.customer_name || direct?.customerName || direct?.display_name || direct?.displayName;
   if (typeof directName === "string" && directName.trim() && !/^customer\s*\d*$/i.test(directName.trim())) return directName.trim();
@@ -104,19 +106,18 @@ const getCustomerName = (inv: any, customersById: Record<number, any>) => {
     "";
 
   const directFull = `${first || ""} ${last || ""}`.trim();
-  if (directFull) return directFull;
+  if (directFull && !isGenericCustomerLabel(directFull)) return directFull;
 
   // 2) Lookup from customers map
   const cid = getCustomerIdFromInvoice(inv);
   if (cid && customersById[cid]) {
     const c = customersById[cid];
-    const fullFromMap = (c?.name || c?.full_name || "").toString().trim();
-    if (fullFromMap) return fullFromMap;
-
-    const fn = (c?.first_name ?? c?.firstName ?? "").toString();
-    const ln = (c?.last_name ?? c?.lastName ?? "").toString();
-    const full = `${fn} ${ln}`.trim();
-    return full || `Customer ${cid}`;
+    const candidates = [
+      c?.name, c?.full_name, c?.fullName, c?.customer_name, c?.customerName, c?.display_name, c?.displayName,
+      `${c?.first_name ?? c?.firstName ?? ""} ${c?.last_name ?? c?.lastName ?? ""}`.trim(),
+    ].map((v: any) => (typeof v === "string" ? v.trim() : "")).filter(Boolean);
+    const best = candidates.find((v: string) => !isGenericCustomerLabel(v));
+    return best || candidates[0] || `Customer ${cid}`;
   }
 
   // 3) Fallback
@@ -124,6 +125,17 @@ const getCustomerName = (inv: any, customersById: Record<number, any>) => {
 };
 
 
+
+const getCreatedSortTime = (inv: any) => {
+  const t = new Date(inv?.created_at || inv?.invoice_date || inv?.updated_at || 0).getTime();
+  return Number.isFinite(t) ? t : 0;
+};
+
+const getInvoiceNoNumeric = (inv: any) => {
+  const raw = String(inv?.invoice_no || "");
+  const m = raw.match(/(\d+)$/);
+  return m ? Number(m[1]) : (getInvoiceId(inv) || 0);
+};
 
 const ITEMS_PER_PAGE = 10;
 
@@ -215,9 +227,9 @@ setCustomersById(map);
       });
 
       recallableOnly.sort((a: any, b: any) => {
-        const ta = new Date((a?.updated_at || a?.created_at || 0) as any).getTime();
-        const tb = new Date((b?.updated_at || b?.created_at || 0) as any).getTime();
-        return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+        const dt = getCreatedSortTime(b) - getCreatedSortTime(a);
+        if (dt !== 0) return dt;
+        return getInvoiceNoNumeric(b) - getInvoiceNoNumeric(a);
       });
 
       setInvoices(recallableOnly);
@@ -244,9 +256,9 @@ setCustomersById(map);
           .includes(search.toLowerCase()))
     )
     .sort((a, b) => {
-      const ta = new Date((a.updated_at || a.created_at || 0) as any).getTime();
-      const tb = new Date((b.updated_at || b.created_at || 0) as any).getTime();
-      return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+      const dt = getCreatedSortTime(b) - getCreatedSortTime(a);
+      if (dt !== 0) return dt;
+      return getInvoiceNoNumeric(b) - getInvoiceNoNumeric(a);
     });
 
   useEffect(() => {

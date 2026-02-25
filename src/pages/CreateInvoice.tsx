@@ -8,7 +8,7 @@ import SendInvoiceConfirm from "./SendInvoiceConfirm";
 import RemoveItemConfirm from "./RemoveItemConfirm";
 import { getCustomers, type Customer } from "../api/customers";
 import type { InvoiceItem } from "../api/items";
-import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice, updateInvoiceItem, deleteInvoiceItem } from "../api/invoice";
+import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice, updateInvoiceItem, deleteInvoiceItem, getInvoices } from "../api/invoice";
 
 /* ================= TOKEN HELPERS ================= */
 const getUserFromToken = () => {
@@ -66,6 +66,38 @@ const pickBestCustomerName = (...values: any[]): string => {
   return nonGeneric || cleaned[0] || "";
 };
 
+const getInvoiceNoParts = (invoiceNo?: string | null) => {
+  const raw = String(invoiceNo || "").trim();
+  const m = raw.match(/^(.*?)(\d+)$/);
+  if (!m) return null;
+  return { prefix: m[1], num: Number(m[2]), width: m[2].length };
+};
+
+const incrementInvoiceNo = (invoiceNo?: string | null) => {
+  const parts = getInvoiceNoParts(invoiceNo);
+  if (!parts || !Number.isFinite(parts.num)) return null;
+  const next = String(parts.num + 1).padStart(parts.width, "0");
+  return `${parts.prefix}${next}`;
+};
+
+const pickLatestInvoiceNoPreview = (rows: any[]): string | null => {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const getTime = (inv: any) => {
+    const t = new Date(inv?.created_at || inv?.invoice_date || inv?.updated_at || 0).getTime();
+    return Number.isFinite(t) ? t : 0;
+  };
+  const getNoNum = (inv: any) => {
+    const p = getInvoiceNoParts(inv?.invoice_no);
+    return p?.num ?? Number(inv?.id ?? inv?.invoice_id ?? 0) ?? 0;
+  };
+  const sorted = [...rows].sort((a,b) => {
+    const dt = getTime(b) - getTime(a);
+    if (dt !== 0) return dt;
+    return getNoNum(b) - getNoNum(a);
+  });
+  return incrementInvoiceNo(sorted[0]?.invoice_no) || null;
+};
+
 const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
   /* ================= MODALS ================= */
   const [showRecall, setShowRecall] = useState(false);
@@ -82,11 +114,32 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
   const [invoiceItems, setInvoiceItems] = useState<InvoiceItem[]>([]);
   const [qty, setQty] = useState<string>("0"); // Changed to string with default "0"
   const [invoiceNumber, setInvoiceNumber] = useState<string>("AUTO");
+  const [nextInvoicePreviewNo, setNextInvoicePreviewNo] = useState<string | null>(null);
   const [discountType] = useState<"percentage" | "fixed">("percentage");
   const [discountAmount, setDiscountAmount] = useState(0);
   const [paidAmount, setPaidAmount] = useState(0);
   const [previousInvoiceId, setPreviousInvoiceId] = useState<number | null>(null);
   const [lastCreatedInvoiceNo, setLastCreatedInvoiceNo] = useState<string | null>(null);
+
+  // Best-effort preview invoice number (without creating a draft invoice yet)
+  useEffect(() => {
+    let cancelled = false;
+    const loadPreviewNo = async () => {
+      if (previousInvoiceId) return;
+      try {
+        const res = await getInvoices();
+        const data = res.data;
+        const list = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.data?.data) ? data.data.data : [];
+        const preview = pickLatestInvoiceNoPreview(list);
+        if (!cancelled && preview) setNextInvoicePreviewNo(preview);
+      } catch (e) {
+        console.warn("Failed to load invoice preview number", e);
+      }
+    };
+    void loadPreviewNo();
+    return () => { cancelled = true; };
+  // only once / when switching between new vs recall
+  }, [previousInvoiceId]);
 
   /* ================= TOTALS ================= */
   const subtotal = invoiceItems.reduce(
@@ -290,7 +343,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
   const clearLastCreatedIfStartingNew = () => {
     if (lastCreatedInvoiceNo && !previousInvoiceId) {
       setLastCreatedInvoiceNo(null);
-      setInvoiceNumber("AUTO");
+      setInvoiceNumber(nextInvoicePreviewNo || "AUTO");
       setQty("0");
     }
   };
@@ -605,9 +658,9 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
     // For a new unsaved invoice, do not show a fake generated number.
     if (!lastCreatedInvoiceNo && invoiceNumber !== "AUTO") {
-      setInvoiceNumber("AUTO");
+      setInvoiceNumber(nextInvoicePreviewNo || "AUTO");
     }
-  }, [invoiceNumber, lastCreatedInvoiceNo, previousInvoiceId]);
+  }, [invoiceNumber, lastCreatedInvoiceNo, previousInvoiceId, nextInvoicePreviewNo]);
 
   const handleRecallInvoice = async (invoice: any) => {
     const invoiceId = Number(invoice?.id ?? invoice?.invoice_id ?? invoice?.invoiceId ?? 0) || undefined;
@@ -819,6 +872,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       // Set the invoice number and remember it
       setInvoiceNumber(sentInvoiceNo);
       setLastCreatedInvoiceNo(sentInvoiceNo);
+      setNextInvoicePreviewNo(incrementInvoiceNo(sentInvoiceNo));
 
       alert(`Invoice #${sentInvoiceNo} sent to cashier successfully!`);
 
@@ -883,7 +937,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       setPreviousInvoiceId(null);
       recalledOriginalInvoiceNoRef.current = null;
       recalledOriginalItemIdsRef.current = [];
-      setInvoiceNumber("AUTO");
+      setInvoiceNumber(nextInvoicePreviewNo || "AUTO");
       setLastCreatedInvoiceNo(null);
       setShowCancelConfirm(false);
 
@@ -920,7 +974,7 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     if (previousInvoiceId && invoiceNumber && invoiceNumber !== "AUTO") return invoiceNumber;
     if (lastCreatedInvoiceNo) return lastCreatedInvoiceNo;
     if (invoiceNumber && invoiceNumber !== "AUTO") return invoiceNumber;
-    return "AUTO";
+    return nextInvoicePreviewNo || "AUTO";
   };
   const displayInvoiceNumber = getDisplayNo();
 
