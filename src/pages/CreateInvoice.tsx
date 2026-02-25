@@ -94,9 +94,6 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
   // Keep the last saved draft invoice id so we can cancel it if needed.
   const lastDraftInvoiceIdRef = useRef<number | null>(null);
 
-  // Prevent duplicate status updates when the same invoice is recalled multiple times in one session.
-  const recalledStatusMarkedIdsRef = useRef<Set<number>>(new Set());
-
   // Keep the latest invoice draft state for unmount auto-save.
   const draftSnapshotRef = useRef({
     selectedCustomer: null as Customer | null,
