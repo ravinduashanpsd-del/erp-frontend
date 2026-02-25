@@ -46,3 +46,22 @@ export const updateInvoice = (invoiceId: number, data: Record<string, any>) =>
 // Note: backend may expect "CANCELLED" or "CANCELED". We try "CANCELLED" first in the UI layer.
 export const cancelInvoice = (invoiceId: number) =>
   updateInvoice(invoiceId, { status: "CANCELLED" });
+
+// Best-effort helper to mark original invoice as recalled for audit/history.
+// Some backends may not yet support the "RECALLED" status enum, so we try
+// common variants and let the UI continue even if all fail.
+export const markInvoiceRecalled = async (invoiceId: number) => {
+  const candidates = ["RECALLED", "RECALL", "RECALLED_IN_PROGRESS"];
+  let lastError: any = null;
+
+  for (const status of candidates) {
+    try {
+      return await updateInvoice(invoiceId, { status });
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  throw lastError;
+};
+

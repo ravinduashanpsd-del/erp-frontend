@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import RecallInvoiceConfirm from "./RecallInvoiceConfirm";
-import { getInvoices } from "../api/invoice";
+import { getInvoiceById, getInvoices, markInvoiceRecalled } from "../api/invoice";
 import Pagination from "../components/Pagination";
 
 interface ViewPreviousInvoiceProps {
   goBack: () => void;
+  onRecallToCreateInvoice?: () => void;
 }
 
 interface Invoice {
@@ -36,13 +37,16 @@ const isRecallableStatus = (status?: string) => {
 
 
 const ITEMS_PER_PAGE = 20;
+const RECALL_INVOICE_STORAGE_KEY = "pos_recalled_invoice_payload";
+const RECALL_OPEN_CREATE_KEY = "pos_open_create_invoice_from_recall";
 
-const ViewPreviousInvoice = ({ goBack }: ViewPreviousInvoiceProps) => {
+const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousInvoiceProps) => {
   const [showRecallConfirm, setShowRecallConfirm] = useState(false);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
 
   // 🔹 Load invoices
   useEffect(() => {
@@ -89,9 +93,45 @@ const ViewPreviousInvoice = ({ goBack }: ViewPreviousInvoiceProps) => {
     setCurrentPage(1);
   }, [search]);
 
-  const handleRecall = () => {
-    console.log("Invoice recalled");
-    setShowRecallConfirm(false);
+  const handleRecall = async () => {
+    if (!selectedInvoice) {
+      setShowRecallConfirm(false);
+      return;
+    }
+
+    try {
+      // Fetch full invoice details (items + customer) before sending to Create Invoice screen
+      const res = await getInvoiceById(selectedInvoice.id);
+      const fullInvoice = (res.data?.data ?? res.data) || selectedInvoice;
+
+      // Best-effort status update for audit clarity; do not block recall if backend enum is not ready
+      try {
+        await markInvoiceRecalled(selectedInvoice.id);
+        setInvoices((prev) =>
+          prev.map((inv) =>
+            inv.id === selectedInvoice.id ? { ...inv, status: "RECALLED" } : inv
+          )
+        );
+      } catch (statusErr) {
+        console.warn("Could not update original invoice status to RECALLED:", statusErr);
+      }
+
+      localStorage.setItem(RECALL_INVOICE_STORAGE_KEY, JSON.stringify(fullInvoice));
+      localStorage.setItem(RECALL_OPEN_CREATE_KEY, "1");
+
+      setShowRecallConfirm(false);
+      setSelectedInvoice(null);
+
+      if (onRecallToCreateInvoice) {
+        onRecallToCreateInvoice();
+      } else {
+        goBack();
+      }
+    } catch (err) {
+      console.error("Failed to recall invoice", err);
+      alert("Failed to recall invoice. Please try again.");
+      setShowRecallConfirm(false);
+    }
   };
 
   // 🔹 Pagination logic
@@ -202,7 +242,10 @@ const ViewPreviousInvoice = ({ goBack }: ViewPreviousInvoiceProps) => {
                 <div className="flex justify-center">
                   {isRecallableStatus(inv.status) ? (
                     <button
-                      onClick={() => setShowRecallConfirm(true)}
+                      onClick={() => {
+                        setSelectedInvoice(inv);
+                        setShowRecallConfirm(true);
+                      }}
                       className="px-6 py-2 bg-gradient-to-r from-blue-500 to-blue-700 text-white rounded-full text-[20px] font-bold hover:from-blue-600 hover:to-blue-800 transition-all shadow-md"
                     >
                       Recall
@@ -232,7 +275,10 @@ const ViewPreviousInvoice = ({ goBack }: ViewPreviousInvoiceProps) => {
       {showRecallConfirm && (
         <RecallInvoiceConfirm
           onConfirm={handleRecall}
-          onClose={() => setShowRecallConfirm(false)}
+          onClose={() => {
+            setShowRecallConfirm(false);
+            setSelectedInvoice(null);
+          }}
         />
       )}
 

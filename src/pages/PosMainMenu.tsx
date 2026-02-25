@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import CreateInvoice from "./CreateInvoice";
 import CreateEditCustomer from "./CreateEditCustomer";
 import ViewPreviousInvoice from "./ViewPreviousInvoice";
+
+const RECALL_OPEN_CREATE_KEY = "pos_open_create_invoice_from_recall";
 
 const PosMainMenu = () => {
     const navigate = useNavigate();
@@ -12,10 +14,30 @@ const PosMainMenu = () => {
     const [showCreateCustomer, setShowCreateCustomer] = useState(false);
     const [showViewInvoice, setShowViewInvoice] = useState(false);
 
+    useEffect(() => {
+        try {
+            const shouldOpenCreate = localStorage.getItem(RECALL_OPEN_CREATE_KEY) === "1";
+            if (shouldOpenCreate) {
+                localStorage.removeItem(RECALL_OPEN_CREATE_KEY);
+                setShowCreateInvoice(true);
+            }
+        } catch {
+            // ignore localStorage issues
+        }
+    }, []);
+
     // Conditional rendering based on which action is chosen
     if (showCreateInvoice) return <CreateInvoice goBack={() => setShowCreateInvoice(false)} />;
     if (showCreateCustomer) return <CreateEditCustomer goBack={() => setShowCreateCustomer(false)} />;
-    if (showViewInvoice) return <ViewPreviousInvoice goBack={() => setShowViewInvoice(false)} />;
+    if (showViewInvoice) return (
+        <ViewPreviousInvoice
+            goBack={() => setShowViewInvoice(false)}
+            onRecallToCreateInvoice={() => {
+                setShowViewInvoice(false);
+                setShowCreateInvoice(true);
+            }}
+        />
+    );
 
     return (
         <div className="w-[1200px] h-[1920px] bg-black flex flex-col items-center justify-center p-10 overflow-hidden">

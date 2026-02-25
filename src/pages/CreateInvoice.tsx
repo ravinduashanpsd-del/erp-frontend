@@ -8,7 +8,7 @@ import SendInvoiceConfirm from "./SendInvoiceConfirm";
 import RemoveItemConfirm from "./RemoveItemConfirm";
 import type { Customer } from "../api/customers";
 import type { InvoiceItem } from "../api/items";
-import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice } from "../api/invoice";
+import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice, markInvoiceRecalled } from "../api/invoice";
 
 /* ================= TOKEN HELPERS ================= */
 const getUserFromToken = () => {
@@ -48,6 +48,9 @@ const getUserNameFromToken = (): string => {
 interface CreateInvoiceProps {
   goBack: () => void;
 }
+
+const RECALL_INVOICE_STORAGE_KEY = "pos_recalled_invoice_payload";
+const RECALL_OPEN_CREATE_KEY = "pos_open_create_invoice_from_recall";
 
 const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
   /* ================= MODALS ================= */
@@ -90,6 +93,9 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
   // Keep the last saved draft invoice id so we can cancel it if needed.
   const lastDraftInvoiceIdRef = useRef<number | null>(null);
+
+  // Prevent duplicate status updates when the same invoice is recalled multiple times in one session.
+  const recalledStatusMarkedIdsRef = useRef<Set<number>>(new Set());
 
   // Keep the latest invoice draft state for unmount auto-save.
   const draftSnapshotRef = useRef({
@@ -202,6 +208,8 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
       // Clear local draft if any
       localStorage.removeItem("pos_local_draft_invoice");
+      localStorage.removeItem(RECALL_INVOICE_STORAGE_KEY);
+      localStorage.removeItem(RECALL_OPEN_CREATE_KEY);
     } catch (e) {
       // Do not block navigation if draft save fails
       console.warn("Failed to persist active invoice draft:", e);
@@ -255,6 +263,112 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     }
   };
 
+
+  const mapRecalledInvoiceItems = (invoice: any): InvoiceItem[] => {
+    const sourceItems =
+      invoice?.invoice_items ??
+      invoice?.items ??
+      invoice?.invoiceItems ??
+      [];
+
+    if (!Array.isArray(sourceItems)) return [];
+
+    return sourceItems.map((item: any, idx: number) => ({
+      id: Number(item?.stock_id ?? item?.stockId ?? item?.stock?.id ?? item?.id ?? idx + 1),
+      stockId: Number(item?.stock_id ?? item?.stockId ?? item?.stock?.id ?? item?.id ?? 0) || undefined,
+      sku: item?.stock?.sku ?? item?.sku ?? item?.item_sku ?? "N/A",
+      name: item?.stock?.name ?? item?.name ?? item?.item_name ?? "Unknown Item",
+      description: item?.stock?.description ?? item?.description ?? "",
+      unitPrice: Number(item?.selling_price ?? item?.unitPrice ?? item?.price ?? 0) || 0,
+      qty: Math.max(1, Number(item?.quantity ?? item?.qty ?? 1) || 1),
+    }));
+  };
+
+  const resolveRecalledCustomer = (invoice: any): Customer | null => {
+    const c = invoice?.customer;
+    if (c && typeof c === "object") {
+      return {
+        id: Number(c?.id ?? invoice?.customer_id ?? 0),
+        first_name: c?.first_name ?? c?.firstName ?? c?.name ?? "",
+        last_name: c?.last_name ?? c?.lastName ?? "",
+        telephone: c?.telephone ?? c?.phone,
+      };
+    }
+
+    const fallbackId = Number(invoice?.customer_id ?? 0);
+    if (fallbackId > 0) {
+      return {
+        id: fallbackId,
+        first_name: invoice?.customer_first_name ?? invoice?.customerFirstName ?? "",
+        last_name: invoice?.customer_last_name ?? invoice?.customerLastName ?? "",
+      };
+    }
+
+    return null;
+  };
+
+  const markOriginalInvoiceAsRecalled = async (invoiceId?: number | null) => {
+    const id = Number(invoiceId);
+    if (!Number.isFinite(id) || id <= 0) return;
+    if (recalledStatusMarkedIdsRef.current.has(id)) return;
+
+    try {
+      await markInvoiceRecalled(id);
+      recalledStatusMarkedIdsRef.current.add(id);
+    } catch (e) {
+      // Non-blocking: backend may not yet support RECALLED enum
+      console.warn("Could not mark original invoice as RECALLED:", e);
+    }
+  };
+
+  const applyRecalledInvoiceToForm = async (invoice: any) => {
+    if (!invoice) return;
+
+    const recalledId = Number(invoice?.id);
+    if (Number.isFinite(recalledId) && recalledId > 0) {
+      setPreviousInvoiceId(recalledId);
+    } else {
+      setPreviousInvoiceId(null);
+    }
+
+    setInvoiceNumber(invoice?.invoice_no || (Number.isFinite(recalledId) ? `INV-${recalledId}` : "AUTO"));
+    setLastCreatedInvoiceNo(null);
+
+    setSelectedCustomer(resolveRecalledCustomer(invoice));
+    setInvoiceItems(mapRecalledInvoiceItems(invoice));
+    setPaidAmount(Number(invoice?.paid_amount || 0));
+    setDiscountAmount(Number(invoice?.discount_amount || 0));
+    setQty((invoice?.next_box_number ?? 0).toString());
+
+    // best effort audit update
+    await markOriginalInvoiceAsRecalled(recalledId);
+  };
+
+  // If user recalled from "View Previous Invoice", that screen stores the selected invoice in localStorage.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(RECALL_INVOICE_STORAGE_KEY);
+      if (!raw) return;
+
+      const stored = JSON.parse(raw);
+      localStorage.removeItem(RECALL_INVOICE_STORAGE_KEY);
+      localStorage.removeItem(RECALL_OPEN_CREATE_KEY);
+
+      // fire-and-forget; UI will still update if status mark fails
+      void applyRecalledInvoiceToForm(stored);
+    } catch (e) {
+      console.warn("Failed to load recalled invoice from storage:", e);
+      try {
+        localStorage.removeItem(RECALL_INVOICE_STORAGE_KEY);
+        localStorage.removeItem(RECALL_OPEN_CREATE_KEY);
+      } catch {
+        // ignore
+      }
+    }
+    // run once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /* ================= AUTO GENERATE INVOICE NO ================= */
   useEffect(() => {
     if (!lastCreatedInvoiceNo && selectedCustomer && invoiceItems.length > 0 && invoiceNumber === "AUTO") {
@@ -275,26 +389,9 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     } catch (e) {
       console.warn("Could not fetch full invoice for recall", e);
     }
+
     console.log("Recalled invoice for state update:", invoice);
-    setPreviousInvoiceId(invoice.id);
-    setInvoiceNumber(invoice.invoice_no || `INV-${invoice.id}`);
-    setLastCreatedInvoiceNo(null); // Clear last created so recalled number shows
-    setSelectedCustomer(invoice.customer || null);
-
-    // Map backend invoice_items to frontend InvoiceItem structure
-    const mappedItems = (invoice.invoice_items || []).map((item: any) => ({
-      id: item.stock_id || item.id,
-      sku: item.stock?.sku || item.sku || "N/A",
-      name: item.stock?.name || item.name || "Unknown Item",
-      description: item.stock?.description || item.description || "",
-      unitPrice: Number(item.selling_price || item.unitPrice || 0),
-      qty: Number(item.quantity || item.qty || 0)
-    }));
-
-    setInvoiceItems(mappedItems);
-    setPaidAmount(Number(invoice.paid_amount || 0));
-    setDiscountAmount(Number(invoice.discount_amount || 0));
-    setQty(invoice.next_box_number?.toString() || "0");
+    await applyRecalledInvoiceToForm(invoice);
     setShowRecall(false);
   };
 
@@ -378,11 +475,18 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
       await sendInvoice(newInvoiceId);
 
+      // Retry best-effort status mark after successful new invoice creation (useful if first attempt failed)
+      if (previousInvoiceId) {
+        void markOriginalInvoiceAsRecalled(previousInvoiceId);
+      }
+
       alert(`Invoice #${newInvoiceNo} sent to cashier successfully!`);
 
       // Mark as finalized so auto-save does not run
       hasFinalizedRef.current = true;
       localStorage.removeItem("pos_local_draft_invoice");
+      localStorage.removeItem(RECALL_INVOICE_STORAGE_KEY);
+      localStorage.removeItem(RECALL_OPEN_CREATE_KEY);
 
       // Reset form but keep the invoice number displayed
       setInvoiceItems([]);
@@ -405,8 +509,9 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
   const handleCancelInvoice = async () => {
     try {
-      // If we already created/saved a draft (or recalled one), cancel it in backend
-      const toCancelId = lastDraftInvoiceIdRef.current || previousInvoiceId || null;
+      // Cancel only the draft created by this screen.
+      // Do NOT cancel the original recalled invoice record.
+      const toCancelId = lastDraftInvoiceIdRef.current || null;
 
       if (toCancelId) {
         try {
@@ -424,6 +529,8 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
       // Mark as finalized so auto-save does not create an ACTIVE invoice after cancel
       hasFinalizedRef.current = true;
       localStorage.removeItem("pos_local_draft_invoice");
+      localStorage.removeItem(RECALL_INVOICE_STORAGE_KEY);
+      localStorage.removeItem(RECALL_OPEN_CREATE_KEY);
 
       // Reset everything including invoice number
       setInvoiceItems([]);
