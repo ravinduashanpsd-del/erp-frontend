@@ -84,9 +84,11 @@ const getCustomerName = (inv: any, customersById: Record<number, any>) => {
   if (typeof direct === "string" && direct.trim()) return direct.trim();
   if (typeof inv?.customer_name === "string" && inv.customer_name.trim()) return inv.customer_name.trim();
   if (typeof inv?.customerName === "string" && inv.customerName.trim()) return inv.customerName.trim();
+  if (typeof inv?.customer_full_name === "string" && inv.customer_full_name.trim()) return inv.customer_full_name.trim();
+  if (typeof inv?.customerFullName === "string" && inv.customerFullName.trim()) return inv.customerFullName.trim();
 
-  const directName = direct?.name || direct?.full_name;
-  if (typeof directName === "string" && directName.trim()) return directName.trim();
+  const directName = direct?.name || direct?.full_name || direct?.fullName || direct?.customer_name || direct?.customerName || direct?.display_name || direct?.displayName;
+  if (typeof directName === "string" && directName.trim() && !/^customer\s*\d*$/i.test(directName.trim())) return directName.trim();
 
   const first =
     direct?.first_name ??
@@ -176,9 +178,9 @@ customersArr.forEach((c: any) => {
   map[id] = {
     ...c,
     id,
-    first_name: c?.first_name ?? c?.firstName ?? c?.name ?? "",
+    first_name: c?.first_name ?? c?.firstName ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName ?? c?.name ?? "",
     last_name: c?.last_name ?? c?.lastName ?? "",
-    full_name: c?.full_name ?? c?.fullName ?? c?.name ?? "",
+    full_name: c?.full_name ?? c?.fullName ?? c?.customer_name ?? c?.customerName ?? c?.display_name ?? c?.displayName ?? c?.name ?? "",
   };
 });
 setCustomersById(map);
@@ -212,6 +214,12 @@ setCustomersById(map);
         return st === "PENDING" || st === "ACTIVE";
       });
 
+      recallableOnly.sort((a: any, b: any) => {
+        const ta = new Date((a?.updated_at || a?.created_at || 0) as any).getTime();
+        const tb = new Date((b?.updated_at || b?.created_at || 0) as any).getTime();
+        return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+      });
+
       setInvoices(recallableOnly);
     } catch (err) {
       console.error("Error fetching invoices:", err);
@@ -224,16 +232,22 @@ setCustomersById(map);
   fetchData();
 }, []);
 
-  const filteredInvoices = invoices.filter((invoice) =>
-    (getInvoiceId(invoice)?.toString() || "").includes(search) ||
-    (invoice.invoice_no && invoice.invoice_no.toLowerCase().includes(search.toLowerCase())) ||
-    invoice.created_at.toLowerCase().includes(search.toLowerCase()) ||
-    (getCustomerName(invoice, customersById).toLowerCase().includes(search.toLowerCase())) ||
-    (invoice.created_user &&
-      `${invoice.created_user.first_name || ''} ${invoice.created_user.last_name || ''}`
-        .toLowerCase()
-        .includes(search.toLowerCase()))
-  );
+  const filteredInvoices = [...invoices]
+    .filter((invoice) =>
+      (getInvoiceId(invoice)?.toString() || "").includes(search) ||
+      (invoice.invoice_no && invoice.invoice_no.toLowerCase().includes(search.toLowerCase())) ||
+      String(invoice.created_at || "").toLowerCase().includes(search.toLowerCase()) ||
+      (getCustomerName(invoice, customersById).toLowerCase().includes(search.toLowerCase())) ||
+      (invoice.created_user &&
+        `${invoice.created_user.first_name || ''} ${invoice.created_user.last_name || ''}`
+          .toLowerCase()
+          .includes(search.toLowerCase()))
+    )
+    .sort((a, b) => {
+      const ta = new Date((a.updated_at || a.created_at || 0) as any).getTime();
+      const tb = new Date((b.updated_at || b.created_at || 0) as any).getTime();
+      return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+    });
 
   useEffect(() => {
     setCurrentPage(1);

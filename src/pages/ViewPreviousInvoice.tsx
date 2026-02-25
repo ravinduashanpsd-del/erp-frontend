@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import RecallInvoiceConfirm from "./RecallInvoiceConfirm";
 import { getInvoiceById, getInvoices } from "../api/invoice";
+import { getCustomers } from "../api/customers";
 import Pagination from "../components/Pagination";
 
 interface ViewPreviousInvoiceProps {
@@ -20,6 +21,11 @@ interface Invoice {
     first_name: string;
     last_name: string;
   };
+  customer_id?: number;
+  customer?: any;
+  customer_name?: string;
+  customerName?: string;
+  updated_at?: string;
 }
 
 
@@ -35,6 +41,52 @@ const isRecallableStatus = (status?: string) => {
   return st === "PENDING" || st === "ACTIVE";
 };
 
+const getCustomerIdFromInvoice = (inv: any): number | null => {
+  const raw = inv?.customer_id ?? inv?.customerId ?? inv?.customer?.id;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+const getInvoiceSortTime = (inv: any) => {
+  const t = new Date(inv?.updated_at || inv?.created_at || inv?.invoice_date || 0).getTime();
+  return Number.isFinite(t) ? t : 0;
+};
+
+const getInvoiceCustomerName = (inv: any, customersById: Record<number, any>) => {
+  const normalize = (v: any) => (typeof v === "string" ? v.trim() : "");
+  const candidates = [
+    inv?.bill_for,
+    inv?.billFor,
+    inv?.customer_name,
+    inv?.customerName,
+    inv?.customer_full_name,
+    inv?.customerFullName,
+    inv?.customer?.full_name,
+    inv?.customer?.fullName,
+    inv?.customer?.customer_name,
+    inv?.customer?.customerName,
+    inv?.customer?.display_name,
+    inv?.customer?.displayName,
+    inv?.customer?.name,
+    `${inv?.customer?.first_name || inv?.customer?.firstName || ""} ${inv?.customer?.last_name || inv?.customer?.lastName || ""}`.trim(),
+  ].map(normalize).filter(Boolean);
+
+  const nonGeneric = candidates.find((v) => !/^customer\s*\d*$/i.test(v));
+  if (nonGeneric) return nonGeneric;
+
+  const cid = getCustomerIdFromInvoice(inv);
+  if (cid && customersById[cid]) {
+    const c = customersById[cid];
+    const mappedCandidates = [
+      c?.full_name, c?.fullName, c?.customer_name, c?.customerName, c?.display_name, c?.displayName, c?.name,
+      `${c?.first_name || c?.firstName || ""} ${c?.last_name || c?.lastName || ""}`.trim(),
+    ].map(normalize).filter(Boolean);
+    const best = mappedCandidates.find((v) => !/^customer\s*\d*$/i.test(v));
+    if (best) return best;
+  }
+
+  return candidates[0] || (cid ? `Customer ${cid}` : "-");
+};
 
 const ITEMS_PER_PAGE = 20;
 const RECALL_INVOICE_STORAGE_KEY = "pos_recalled_invoice_payload";
@@ -47,13 +99,44 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
   const [currentPage, setCurrentPage] = useState(1);
   const [search, setSearch] = useState("");
   const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
+  const [customersById, setCustomersById] = useState<Record<number, any>>({});
 
   // 🔹 Load invoices
   useEffect(() => {
     const loadInvoices = async () => {
       try {
         setLoading(true);
-        const res = await getInvoices();
+
+        const fetchAllCustomers = async () => {
+          const LIMIT = 200;
+          const all: any[] = [];
+          for (let page = 1; page <= 30; page++) {
+            const cres = await getCustomers(page, LIMIT, "");
+            const d = cres.data;
+            const arr =
+              Array.isArray(d) ? d :
+              Array.isArray(d?.data) ? d.data :
+              Array.isArray(d?.customers) ? d.customers :
+              Array.isArray(d?.data?.customers) ? d.data.customers :
+              Array.isArray(d?.data?.data) ? d.data.data :
+              [];
+            if (!Array.isArray(arr) || arr.length === 0) break;
+            all.push(...arr);
+            if (arr.length < LIMIT) break;
+          }
+          return all;
+        };
+
+        const [res, allCustomers] = await Promise.all([getInvoices(), fetchAllCustomers()]);
+
+        const cmap: Record<number, any> = {};
+        allCustomers.forEach((c: any) => {
+          const id = Number(c?.id ?? c?.customer_id ?? c?.customerId);
+          if (!Number.isFinite(id) || id <= 0) return;
+          cmap[id] = c;
+        });
+        setCustomersById(cmap);
+
         // Backend responses can differ, so parse defensively.
         const data = res.data;
         const list =
@@ -61,7 +144,9 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
           Array.isArray(data?.data) ? data.data :
           Array.isArray(data?.data?.data) ? data.data.data :
           [];
-        setInvoices(list);
+
+        const sorted = [...list].sort((a: any, b: any) => getInvoiceSortTime(b) - getInvoiceSortTime(a));
+        setInvoices(sorted as Invoice[]);
       } catch (err) {
         console.error("Failed to load invoices", err);
       } finally {
@@ -73,20 +158,22 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
   }, []);
 
   // 🔹 Local Filter
-  const filteredInvoices = invoices.filter((inv) => {
+  const filteredInvoices = [...invoices].filter((inv) => {
     const s = search.toLowerCase();
     const invoiceNo = (inv.invoice_no || "").toLowerCase();
     const status = (inv.status || "").toLowerCase();
     const creator = inv.created_user
       ? (`${inv.created_user.first_name || ""} ${inv.created_user.last_name || ""}`).toLowerCase()
       : "";
+    const customer = getInvoiceCustomerName(inv, customersById).toLowerCase();
 
     return (
       invoiceNo.includes(s) ||
       status.includes(s) ||
-      creator.includes(s)
+      creator.includes(s) ||
+      customer.includes(s)
     );
-  });
+  }).sort((a, b) => getInvoiceSortTime(b) - getInvoiceSortTime(a));
 
   // 🔹 Reset page when search changes
   useEffect(() => {
@@ -102,7 +189,12 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
     try {
       // Fetch full invoice details (items + customer) before sending to Create Invoice screen
       const res = await getInvoiceById(selectedInvoice.id);
-      const fullInvoice = (res.data?.data ?? res.data) || selectedInvoice;
+      const fullInvoice: any = (res.data?.data?.invoice ?? res.data?.data ?? res.data?.invoice ?? res.data) || selectedInvoice;
+      if (!fullInvoice.id && selectedInvoice?.id) fullInvoice.id = selectedInvoice.id;
+      const cid = getCustomerIdFromInvoice(fullInvoice) ?? getCustomerIdFromInvoice(selectedInvoice);
+      if (!fullInvoice.customer && cid && customersById[cid]) {
+        fullInvoice.customer = customersById[cid];
+      }
 
       localStorage.setItem(RECALL_INVOICE_STORAGE_KEY, JSON.stringify(fullInvoice));
       localStorage.setItem(RECALL_OPEN_CREATE_KEY, "1");
@@ -212,9 +304,7 @@ const ViewPreviousInvoice = ({ goBack, onRecallToCreateInvoice }: ViewPreviousIn
                 </div>
 
                 <div className="font-semibold text-center truncate">
-                  {inv.created_user
-                    ? `${inv.created_user.first_name} ${inv.created_user.last_name}`
-                    : "-"}
+                  {getInvoiceCustomerName(inv, customersById)}
                 </div>
 
                 <div className="font-semibold text-center truncate">

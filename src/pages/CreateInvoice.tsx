@@ -6,7 +6,7 @@ import CreateCustomer from "./CreateCustomer";
 import SelectProducts from "./SelectProducts";
 import SendInvoiceConfirm from "./SendInvoiceConfirm";
 import RemoveItemConfirm from "./RemoveItemConfirm";
-import type { Customer } from "../api/customers";
+import { getCustomers, type Customer } from "../api/customers";
 import type { InvoiceItem } from "../api/items";
 import { createInvoice, addInvoiceItem, sendInvoice, getInvoiceById, cancelInvoice, updateInvoice, updateInvoiceItem, deleteInvoiceItem } from "../api/invoice";
 
@@ -51,6 +51,20 @@ interface CreateInvoiceProps {
 
 const RECALL_INVOICE_STORAGE_KEY = "pos_recalled_invoice_payload";
 const RECALL_OPEN_CREATE_KEY = "pos_open_create_invoice_from_recall";
+
+const isGenericCustomerLabel = (value?: string | null) => {
+  const v = String(value || "").trim().toLowerCase();
+  if (!v) return true;
+  return v === "customer" || /^customer\s*\d*$/i.test(v);
+};
+
+const pickBestCustomerName = (...values: any[]): string => {
+  const cleaned = values
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter(Boolean);
+  const nonGeneric = cleaned.find((v) => !isGenericCustomerLabel(v));
+  return nonGeneric || cleaned[0] || "";
+};
 
 const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
   /* ================= MODALS ================= */
@@ -413,44 +427,111 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
   const resolveRecalledCustomer = (invoice: any): Customer | null => {
     const c = invoice?.customer;
-    const billForFallback =
-      invoice?.bill_for ??
-      invoice?.billFor ??
-      invoice?.customer_name ??
-      invoice?.customerName ??
-      "";
+    const billForFallback = pickBestCustomerName(
+      invoice?.bill_for,
+      invoice?.billFor,
+      invoice?.customer_name,
+      invoice?.customerName,
+      invoice?.customer_full_name,
+      invoice?.customerFullName,
+      invoice?.created_for_name,
+      invoice?.createdForName,
+    );
 
-    if (c && typeof c === "object") {
-      const fullName =
-        c?.full_name ??
-        c?.fullName ??
-        c?.customer_name ??
-        c?.customerName ??
-        c?.name ??
-        billForFallback ??
-        "";
+    const buildCustomer = (raw: any, fallbackIdRaw?: any): Customer | null => {
+      if (!raw || typeof raw !== "object") return null;
 
-      const first = c?.first_name ?? c?.firstName ?? (typeof fullName === "string" ? fullName : "") ?? "";
-      const last = c?.last_name ?? c?.lastName ?? "";
-      const cid = Number(c?.id ?? invoice?.customer_id ?? 0);
+      const cid = Number(raw?.id ?? raw?.customer_id ?? raw?.customerId ?? fallbackIdRaw ?? invoice?.customer_id ?? 0);
+      const richName = pickBestCustomerName(
+        raw?.full_name,
+        raw?.fullName,
+        raw?.customer_name,
+        raw?.customerName,
+        raw?.display_name,
+        raw?.displayName,
+        raw?.person_name,
+        raw?.personName,
+        raw?.name,
+        billForFallback,
+      );
+
+      let first = String(raw?.first_name ?? raw?.firstName ?? "").trim();
+      let last = String(raw?.last_name ?? raw?.lastName ?? "").trim();
+
+      if ((!first && !last) || isGenericCustomerLabel(first)) {
+        if (richName) {
+          const parts = richName.split(/\s+/).filter(Boolean);
+          if (parts.length) {
+            first = parts[0];
+            last = parts.slice(1).join(" ");
+          }
+        }
+      }
+
+      const finalFirst = pickBestCustomerName(first, richName, billForFallback) || (cid ? `Customer ${cid}` : "Customer");
+      const finalLast = !isGenericCustomerLabel(last) ? last : "";
 
       return {
         id: Number.isFinite(cid) && cid > 0 ? cid : 0,
-        first_name: String(first || "").trim() || (cid ? `Customer ${cid}` : "Customer"),
-        last_name: String(last || "").trim(),
-        telephone: c?.telephone ?? c?.phone,
+        first_name: finalFirst,
+        last_name: finalLast,
+        telephone: raw?.telephone ?? raw?.phone,
       };
+    };
+
+    if (c && typeof c === "object") {
+      const built = buildCustomer(c);
+      if (built) return built;
     }
 
     const fallbackId = Number(invoice?.customer_id ?? 0);
     if (fallbackId > 0 || billForFallback) {
-      return {
-        id: Number.isFinite(fallbackId) && fallbackId > 0 ? fallbackId : 0,
-        first_name: String(invoice?.customer_first_name ?? invoice?.customerFirstName ?? billForFallback ?? "").trim() || (fallbackId ? `Customer ${fallbackId}` : "Customer"),
-        last_name: String(invoice?.customer_last_name ?? invoice?.customerLastName ?? "").trim(),
-      };
+      const built = buildCustomer({
+        id: fallbackId,
+        first_name: invoice?.customer_first_name ?? invoice?.customerFirstName,
+        last_name: invoice?.customer_last_name ?? invoice?.customerLastName,
+        customer_name: invoice?.customer_name ?? invoice?.customerName,
+        full_name: invoice?.customer_full_name ?? invoice?.customerFullName,
+        name: billForFallback,
+      }, fallbackId);
+      if (built) return built;
     }
 
+    return null;
+  };
+
+  const fetchCustomerByIdForRecall = async (customerId: number): Promise<Customer | null> => {
+    if (!Number.isFinite(customerId) || customerId <= 0) return null;
+    try {
+      const LIMIT = 200;
+      for (let page = 1; page <= 30; page++) {
+        const res = await getCustomers(page, LIMIT, "");
+        const d = res.data;
+        const arr = Array.isArray(d)
+          ? d
+          : Array.isArray(d?.data)
+          ? d.data
+          : Array.isArray(d?.customers)
+          ? d.customers
+          : Array.isArray(d?.data?.customers)
+          ? d.data.customers
+          : Array.isArray(d?.data?.data)
+          ? d.data.data
+          : [];
+
+        if (!Array.isArray(arr) || arr.length === 0) break;
+
+        const found = arr.find((row: any) => Number(row?.id ?? row?.customer_id ?? row?.customerId) === customerId);
+        if (found) {
+          const normalized = resolveRecalledCustomer({ customer: found, customer_id: customerId });
+          if (normalized) return normalized;
+        }
+
+        if (arr.length < LIMIT) break;
+      }
+    } catch (e) {
+      console.warn("Failed to fetch customer for recalled invoice", e);
+    }
     return null;
   };
 
@@ -469,7 +550,15 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     recalledOriginalInvoiceNoRef.current = recalledInvoiceNo;
     setLastCreatedInvoiceNo(null);
 
-    const recalledCustomer = resolveRecalledCustomer(invoice);
+    let recalledCustomer = resolveRecalledCustomer(invoice);
+    if (!recalledCustomer || isGenericCustomerLabel(`${recalledCustomer.first_name || ""} ${recalledCustomer.last_name || ""}`)) {
+      const cid = Number(invoice?.customer_id ?? invoice?.customer?.id ?? 0);
+      if (Number.isFinite(cid) && cid > 0) {
+        const fetched = await fetchCustomerByIdForRecall(cid);
+        if (fetched) recalledCustomer = fetched;
+      }
+    }
+
     const mappedItems = mapRecalledInvoiceItems(invoice);
     recalledOriginalItemIdsRef.current = mappedItems
       .map((it) => Number((it as any).invoiceItemId || 0))
@@ -509,17 +598,16 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ================= AUTO GENERATE INVOICE NO ================= */
+  /* ================= BILL NO DISPLAY (avoid fake invoice numbers) ================= */
   useEffect(() => {
+    // Keep recalled invoice number as-is.
     if (previousInvoiceId) return;
-    if (!lastCreatedInvoiceNo && selectedCustomer && invoiceItems.length > 0 && invoiceNumber === "AUTO") {
-      const timestamp = Math.floor(Date.now() / 1000).toString().slice(-4);
-      setInvoiceNumber(`INV-${timestamp}`);
-    }
-    else if (!lastCreatedInvoiceNo && (!selectedCustomer || invoiceItems.length === 0) && invoiceNumber !== "AUTO") {
+
+    // For a new unsaved invoice, do not show a fake generated number.
+    if (!lastCreatedInvoiceNo && invoiceNumber !== "AUTO") {
       setInvoiceNumber("AUTO");
     }
-  }, [selectedCustomer, invoiceItems, invoiceNumber, lastCreatedInvoiceNo, previousInvoiceId]);
+  }, [invoiceNumber, lastCreatedInvoiceNo, previousInvoiceId]);
 
   const handleRecallInvoice = async (invoice: any) => {
     const invoiceId = Number(invoice?.id ?? invoice?.invoice_id ?? invoice?.invoiceId ?? 0) || undefined;
@@ -829,8 +917,9 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
 
   // Display invoice number - priority: lastCreated > currentDraft > AUTO
   const getDisplayNo = () => {
-    if (lastCreatedInvoiceNo) return `PENDING: ${lastCreatedInvoiceNo}`;
-    if (invoiceNumber && invoiceNumber !== "AUTO") return ` ${invoiceNumber}`;
+    if (previousInvoiceId && invoiceNumber && invoiceNumber !== "AUTO") return invoiceNumber;
+    if (lastCreatedInvoiceNo) return lastCreatedInvoiceNo;
+    if (invoiceNumber && invoiceNumber !== "AUTO") return invoiceNumber;
     return "AUTO";
   };
   const displayInvoiceNumber = getDisplayNo();
@@ -931,7 +1020,16 @@ const CreateInvoice = ({ goBack }: CreateInvoiceProps) => {
                 <span className="mr-2">:</span>
                 <span className="text-blue-800 font-bold truncate">
                   {selectedCustomer
-                    ? (`${selectedCustomer.first_name || ''} ${selectedCustomer.last_name || ''}`.trim() || (selectedCustomer as any)?.name || (selectedCustomer as any)?.full_name || (selectedCustomer.id ? `Customer ${selectedCustomer.id}` : "Select Customer"))
+                    ? (pickBestCustomerName(
+                        (selectedCustomer as any)?.full_name,
+                        (selectedCustomer as any)?.fullName,
+                        (selectedCustomer as any)?.customer_name,
+                        (selectedCustomer as any)?.customerName,
+                        (selectedCustomer as any)?.display_name,
+                        (selectedCustomer as any)?.displayName,
+                        (selectedCustomer as any)?.name,
+                        `${selectedCustomer.first_name || ''} ${selectedCustomer.last_name || ''}`.trim(),
+                      ) || (selectedCustomer.id ? `Customer ${selectedCustomer.id}` : "Select Customer"))
                     : "Select Customer"}
                 </span>
               </div>
